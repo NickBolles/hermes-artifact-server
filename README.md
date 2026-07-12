@@ -39,7 +39,7 @@ GitHub Container Registry image, after the `main` branch workflow completes:
 docker pull ghcr.io/nickbolles/hermes-artifact-server:latest
 ```
 
-The included GitHub Actions workflow builds/tests the Node app, then builds a multi-arch Docker image for `linux/amd64` and `linux/arm64`. It pushes images to GHCR on `main`, version tags like `v0.1.0`, and manual workflow dispatches; pull requests build without pushing.
+The included GitHub Actions workflow builds/tests the Node app, then builds a Docker image for `linux/amd64` by default. It pushes images to GHCR on `main`, version tags like `v0.1.0`, and manual workflow dispatches; pull requests build without pushing.
 
 ## API
 
