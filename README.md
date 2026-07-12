@@ -27,11 +27,19 @@ npm test
 npm start
 ```
 
-Docker:
+Docker, local build:
 
 ```bash
 docker compose -f docker-compose.example.yml up -d --build
 ```
+
+GitHub Container Registry image, after the `main` branch workflow completes:
+
+```bash
+docker pull ghcr.io/sup3rb0wlz/hermes-artifact-server:latest
+```
+
+The included GitHub Actions workflow builds/tests the Node app, then builds a multi-arch Docker image for `linux/amd64` and `linux/arm64`. It pushes images to GHCR on `main`, version tags like `v0.1.0`, and manual workflow dispatches; pull requests build without pushing.
 
 ## API
 
