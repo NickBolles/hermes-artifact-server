@@ -4,17 +4,25 @@ services:
     image: hermes-artifact-server:local
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       BASE_URL: "https://artifacts.example.com"
+      APP_ORIGIN: "https://artifact-apps.example.com"
       ARTIFACT_ROOT: "/data/artifacts"
+      STATE_DB_PATH: "/data/state/artifact-app.db"
       API_TOKEN: "change-me-long-random-api-token"
       ADMIN_USERNAME: "admin"
-      ADMIN_PASSWORD: "change-me-long-random-admin-password"
-      TRUST_PROXY: "true"
+      ADMIN_PASSWORD: ""
+      WEBAUTHN_RP_ID: "artifact-apps.example.com"
+      WEBAUTHN_ORIGIN: "https://artifact-apps.example.com"
+      TRUST_PROXY: "1"
       MAX_UPLOAD_BYTES: "52428800"
+      SESSION_IDLE_MINUTES: "1440"
+      RECOVERY_MAX_CONCURRENT: "2"
+      HERMES_RUN_MAX_MINUTES: "30"
     volumes:
-      - ./artifacts:/data/artifacts
+      - artifact-data:/data/artifacts
+      - artifact-state:/data/state
     read_only: true
     tmpfs:
       - /tmp
@@ -22,3 +30,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+
+volumes:
+  artifact-data:
+  artifact-state:

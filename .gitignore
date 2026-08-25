@@ -2,6 +2,8 @@ node_modules/
 dist/
 .env
 artifacts/
+data/
+state/
 test-tmp/
 npm-debug.log*
 .DS_Store

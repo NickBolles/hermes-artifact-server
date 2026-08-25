@@ -13,10 +13,11 @@ RUN npm prune --omit=dev
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=3000 \
-    ARTIFACT_ROOT=/data/artifacts
+    ARTIFACT_ROOT=/data/artifacts \
+    STATE_DB_PATH=/data/state/artifact-app.db
 WORKDIR /app
 RUN addgroup -S artifact && adduser -S artifact -G artifact \
-  && mkdir -p /data/artifacts \
+  && mkdir -p /data/artifacts /data/state \
   && chown -R artifact:artifact /data /app
 COPY --from=build --chown=artifact:artifact /app/package*.json ./
 COPY --from=build --chown=artifact:artifact /app/node_modules ./node_modules
