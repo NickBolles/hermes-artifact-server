@@ -12,6 +12,7 @@ export const artifactMetaSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   expiresAt: z.string().optional(),
+  revokedAt: z.string().optional(),
   allowDirectoryListing: z.boolean().default(true),
 });
 
@@ -87,7 +88,13 @@ export async function listArtifacts(): Promise<ArtifactMeta[]> {
 }
 
 export function isExpired(meta: ArtifactMeta): boolean {
-  return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) < Date.now());
+  return Boolean(meta.revokedAt || (meta.expiresAt && Date.parse(meta.expiresAt) < Date.now()));
+}
+
+export async function revokeArtifact(slug: string): Promise<void> {
+  const meta = await readMeta(slug);
+  if (!meta) throw new Error('Artifact not found');
+  await writeMeta({ ...meta, revokedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
 }
 
 export async function verifyArtifactToken(meta: ArtifactMeta, token: string): Promise<boolean> {

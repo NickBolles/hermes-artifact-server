@@ -10,10 +10,12 @@ await fs.mkdir(testBase, { recursive: true });
 const root = await fs.mkdtemp(path.join(testBase, 'artifact-server-'));
 const token = 'test-api-token-at-least-32-characters';
 process.env.ARTIFACT_ROOT = root;
+process.env.STATE_DB_PATH = path.join(root, 'state.db');
 process.env.API_TOKEN = token;
 process.env.ADMIN_USERNAME = 'admin';
 process.env.ADMIN_PASSWORD = 'password-password-password';
 process.env.BASE_URL = 'http://example.test';
+process.env.NODE_ENV = 'test';
 
 const { createApp } = await import('./app.js');
 
