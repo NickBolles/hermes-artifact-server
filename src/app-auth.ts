@@ -13,7 +13,8 @@ import { config } from './config.js';
 import type { SessionKind, SessionRow, StateStore, UserRole, UserStatus } from './state.js';
 
 export const SESSION_COOKIE = process.env.NODE_ENV==='production'?'__Host-artifact_app_session':'artifact_app_session';
-export const AUTH_FLOW_COOKIE = process.env.NODE_ENV==='production'?'__Secure-artifact_auth_flow':'artifact_auth_flow';
+export const VIEWER_SESSION_COOKIE = process.env.NODE_ENV==='production'?'__Host-artifact_viewer_session':'artifact_viewer_session';
+export const AUTH_FLOW_COOKIE = process.env.NODE_ENV==='production'?'__Host-artifact_auth_flow':'artifact_auth_flow';
 const ARGON_OPTIONS = { algorithm: Algorithm.Argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1, outputLen: 32 } as const;
 
 function token(bytes = 32): string { return randomBytes(bytes).toString('base64url'); }
@@ -25,6 +26,11 @@ function equalText(a:string,b:string):boolean { const x=Buffer.from(a); const y=
 
 export interface ActiveSession {
   row: SessionRow;
+  user: NonNullable<ReturnType<StateStore['getUserById']>>;
+}
+
+export interface ActiveViewerSession {
+  row: Record<string, unknown>;
   user: NonNullable<ReturnType<StateStore['getUserById']>>;
 }
 
@@ -84,8 +90,10 @@ export class AuthService {
   }
   setSessionCookie(res:Response,issued:IssuedSession):void { res.cookie(SESSION_COOKIE,issued.token,this.cookieOptions()); }
   clearSessionCookie(res:Response):void { res.clearCookie(SESSION_COOKIE,{...this.cookieOptions(),maxAge:0}); }
-  issueAuthFlow(res:Response):{raw:string;hash:string} { const raw=token(); res.cookie(AUTH_FLOW_COOKIE,raw,{httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax',path:'/auth/passkeys',maxAge:5*60*1000}); return {raw,hash:sha256(raw)}; }
-  clearAuthFlow(res:Response):void { res.clearCookie(AUTH_FLOW_COOKIE,{httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax',path:'/auth/passkeys'}); }
+  setViewerSessionCookie(res:Response,raw:string):void { res.cookie(VIEWER_SESSION_COOKIE,raw,{...this.cookieOptions(),maxAge:15*60*1000}); }
+  clearViewerSessionCookie(res:Response):void { res.clearCookie(VIEWER_SESSION_COOKIE,{...this.cookieOptions(),maxAge:0}); }
+  issueAuthFlow(res:Response):{raw:string;hash:string} { const raw=token(); res.cookie(AUTH_FLOW_COOKIE,raw,{httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax',path:'/',maxAge:5*60*1000}); return {raw,hash:sha256(raw)}; }
+  clearAuthFlow(res:Response):void { res.clearCookie(AUTH_FLOW_COOKIE,{httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax',path:'/'}); }
 
   rawCookie(req:Request):string {
     return this.namedCookie(req,SESSION_COOKIE);
@@ -104,6 +112,36 @@ export class AuthService {
     if(!user||user.status==='suspended'||(user.status==='pending'&&row.kind!=='recovery'))return null;
     this.state.touchSession(row.id);
     return {row,user};
+  }
+
+  getRequestViewerSession(req:Request):ActiveViewerSession|null {
+    const raw=this.namedCookie(req,VIEWER_SESSION_COOKIE); if(!raw)return null;
+    const row=this.state.getViewerSessionByHash(sha256(raw)); if(!row)return null;
+    if(row.revoked_at||row.source_revoked_at||Date.parse(String(row.expires_at))<=Date.now()||Date.parse(String(row.source_expires_at))<=Date.now()||Date.now()-Date.parse(String(row.last_used_at))>config.sessionIdleMs||Date.now()-Date.parse(String(row.source_last_used_at))>config.sessionIdleMs)return null;
+    const user=this.state.getUserById(String(row.user_id));
+    if(!user||user.status!=='active'||user.requiresPasskeyEnrollment)return null;
+    this.state.touchViewerSession(String(row.id));
+    return {row,user};
+  }
+
+  beginViewerHandoff(artifactSlug:string,returnPath:string):string {
+    const expectedPrefix=`/v/${encodeURIComponent(artifactSlug)}/`;
+    if(!returnPath.startsWith(expectedPrefix)||returnPath.length>2_048)throw new Error('Invalid artifact return path');
+    const id=randomUUID();
+    this.state.createViewerHandoff({id,artifactSlug,returnPath,expiresAt:addMinutes(5)});
+    return id;
+  }
+
+  authorizeViewerHandoff(id:string,userId:string,appSessionId:string):string|null {
+    const raw=token();
+    return this.state.authorizeViewerHandoff(id,userId,appSessionId,sha256(raw))?raw:null;
+  }
+
+  finishViewerHandoff(rawExchange:string):{sessionToken:string;returnPath:string}|null {
+    const sessionToken=token(); const createdAt=new Date().toISOString();
+    const handoff=this.state.consumeViewerHandoff(sha256(rawExchange),{id:randomUUID(),tokenHash:sha256(sessionToken),createdAt,expiresAt:addMinutes(15)});
+    if(!handoff)return null;
+    return {sessionToken,returnPath:String(handoff.return_path)};
   }
 
   requireCsrf(req:Request,session:ActiveSession):boolean {

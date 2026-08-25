@@ -158,8 +158,23 @@ export class StateStore {
         disposition TEXT NOT NULL, note TEXT, created_at TEXT NOT NULL,
         UNIQUE(actor_id, job_id)
       );
+      CREATE TABLE IF NOT EXISTS artifact_viewer_handoffs (
+        id TEXT PRIMARY KEY, artifact_slug TEXT NOT NULL, return_path TEXT NOT NULL,
+        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+        app_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE, exchange_hash TEXT UNIQUE,
+        expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS artifact_viewer_sessions (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        source_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL, revoked_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS viewer_sessions_user ON artifact_viewer_sessions(user_id);
     `);
     try { this.db.exec('ALTER TABLE auth_challenges ADD COLUMN binding_hash TEXT'); } catch {}
+    try { this.db.exec('ALTER TABLE artifact_viewer_handoffs ADD COLUMN app_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE'); } catch {}
+    try { this.db.exec('ALTER TABLE artifact_viewer_sessions ADD COLUMN source_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE'); } catch {}
     this.db.prepare(`INSERT OR IGNORE INTO apps(id,name,allowed_actions,created_at) VALUES(?,?,?,?)`)
       .run('jobs', 'Jobs', JSON.stringify(['job.feedback.submit', 'report.question.ask']), now());
   }
@@ -221,8 +236,44 @@ export class StateStore {
   getSessionByHash(hash:string):SessionRow|null { const row=this.db.prepare('SELECT * FROM sessions WHERE token_hash=?').get(hash) as Record<string,unknown>|undefined; return row?mapSession(row):null; }
   touchSession(id:string):void { this.db.prepare('UPDATE sessions SET last_used_at=? WHERE id=?').run(now(),id); }
   listSessions(userId?:string):SessionRow[] { const rows=(userId?this.db.prepare('SELECT * FROM sessions WHERE user_id=? ORDER BY created_at DESC').all(userId):this.db.prepare('SELECT * FROM sessions ORDER BY created_at DESC').all()) as Record<string,unknown>[]; return rows.map(mapSession); }
-  revokeSession(id:string):void { this.db.prepare('UPDATE sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(now(),id); }
-  revokeAllSessions(userId:string):void { this.db.prepare('UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').run(now(),userId); }
+  revokeSession(id:string):void { const at=now(); this.db.prepare('UPDATE sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(at,id); this.db.prepare('UPDATE artifact_viewer_sessions SET revoked_at=? WHERE source_session_id=? AND revoked_at IS NULL').run(at,id); }
+  revokeAllSessions(userId:string):void { const at=now(); this.db.prepare('UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').run(at,userId); this.db.prepare('UPDATE artifact_viewer_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').run(at,userId); }
+
+  createViewerHandoff(input:{id:string;artifactSlug:string;returnPath:string;expiresAt:string}):void {
+    this.db.prepare('DELETE FROM artifact_viewer_handoffs WHERE expires_at<? OR consumed_at IS NOT NULL').run(now());
+    this.db.prepare('INSERT INTO artifact_viewer_handoffs(id,artifact_slug,return_path,expires_at,created_at) VALUES(?,?,?,?,?)')
+      .run(input.id,input.artifactSlug,input.returnPath,input.expiresAt,now());
+  }
+  getViewerHandoff(id:string):Record<string,unknown>|null {
+    return (this.db.prepare('SELECT * FROM artifact_viewer_handoffs WHERE id=? AND consumed_at IS NULL AND expires_at>?').get(id,now()) as Record<string,unknown>|undefined)??null;
+  }
+  authorizeViewerHandoff(id:string,userId:string,appSessionId:string,exchangeHash:string):boolean {
+    const at=now();
+    return Number(this.db.prepare('UPDATE artifact_viewer_handoffs SET user_id=?,app_session_id=?,exchange_hash=? WHERE id=? AND user_id IS NULL AND consumed_at IS NULL AND expires_at>? AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=? AND s.user_id=? AND s.revoked_at IS NULL AND s.expires_at>?)').run(userId,appSessionId,exchangeHash,id,at,appSessionId,userId,at).changes)===1;
+  }
+  consumeViewerHandoff(exchangeHash:string,viewer:{id:string;tokenHash:string;createdAt:string;expiresAt:string}):Record<string,unknown>|null {
+    return this.transaction(()=>{
+      const at=now();
+      const handoff=this.db.prepare('SELECT h.*,s.expires_at source_expires_at FROM artifact_viewer_handoffs h JOIN sessions s ON s.id=h.app_session_id WHERE h.exchange_hash=? AND h.user_id IS NOT NULL AND h.consumed_at IS NULL AND h.expires_at>? AND s.revoked_at IS NULL AND s.expires_at>?').get(exchangeHash,at,at) as Record<string,unknown>|undefined;
+      if(!handoff)return null;
+      const consumed=this.db.prepare('UPDATE artifact_viewer_handoffs SET consumed_at=? WHERE id=? AND consumed_at IS NULL').run(now(),handoff.id as SQLInputValue);
+      if(Number(consumed.changes)!==1)return null;
+      const expiresAt=viewer.expiresAt<String(handoff.source_expires_at)?viewer.expiresAt:String(handoff.source_expires_at);
+      this.db.prepare('INSERT INTO artifact_viewer_sessions(id,user_id,source_session_id,token_hash,created_at,last_used_at,expires_at) VALUES(?,?,?,?,?,?,?)')
+        .run(viewer.id,handoff.user_id as SQLInputValue,handoff.app_session_id as SQLInputValue,viewer.tokenHash,viewer.createdAt,viewer.createdAt,expiresAt);
+      return handoff;
+    });
+  }
+  getViewerSessionByHash(hash:string):Record<string,unknown>|null {
+    return (this.db.prepare('SELECT v.*,s.revoked_at source_revoked_at,s.expires_at source_expires_at,s.last_used_at source_last_used_at FROM artifact_viewer_sessions v JOIN sessions s ON s.id=v.source_session_id WHERE v.token_hash=?').get(hash) as Record<string,unknown>|undefined)??null;
+  }
+  listViewerSessions(userId?:string):Record<string,unknown>[] {
+    const sql='SELECT id,user_id,source_session_id,created_at,last_used_at,expires_at,revoked_at FROM artifact_viewer_sessions';
+    return (userId?this.db.prepare(`${sql} WHERE user_id=? ORDER BY created_at DESC`).all(userId):this.db.prepare(`${sql} ORDER BY created_at DESC`).all()) as Record<string,unknown>[];
+  }
+  touchViewerSession(id:string):void { this.db.prepare('UPDATE artifact_viewer_sessions SET last_used_at=? WHERE id=?').run(now(),id); }
+  revokeViewerSession(id:string):void { this.db.prepare('UPDATE artifact_viewer_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(now(),id); }
+  revokeAllViewerSessions(userId:string):void { this.db.prepare('UPDATE artifact_viewer_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').run(now(),userId); }
 
   createInvitation(input:{id:string;tokenHash:string;username:string;role:UserRole;scopes:string[];expiresAt:string;createdBy:string}):void {
     this.db.prepare('INSERT INTO invitations(id,token_hash,username,role,scopes,expires_at,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)')

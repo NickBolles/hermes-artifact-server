@@ -41,9 +41,14 @@ let adminId = '';
 let adminCookie = '';
 let adminCsrf = '';
 let memberId = '';
+let memberSessionId = '';
 let memberCookie = '';
 let memberCsrf = '';
+let otherCookie = '';
+let memberViewerCookie = '';
 let artifactPublicPath = '';
+let authenticatedArtifactPath = '';
+let restrictedArtifactPath = '';
 
 function cookieHeader(raw: string | string[] | undefined): string {
   const values = Array.isArray(raw) ? raw : raw ? [raw] : [];
@@ -63,8 +68,18 @@ before(async () => {
     recoveryPassword: 'another correct horse battery staple',
   });
   const memberSession = auth.issueSession(memberId, 'full');
+  memberSessionId = memberSession.row.id;
   memberCookie = `${authModule.SESSION_COOKIE}=${memberSession.token}`;
   memberCsrf = memberSession.csrfToken;
+
+  const otherInvitation = auth.createInvitation(adminId, {
+    username: 'other', role: 'viewer', scopes: [], expiresInMinutes: 30,
+  });
+  const otherId = await auth.acceptInvitationForTests(otherInvitation.token, {
+    recoveryPassword: 'third correct horse battery staple',
+  });
+  const otherSession = auth.issueSession(otherId, 'full');
+  otherCookie = `${authModule.SESSION_COOKIE}=${otherSession.token}`;
 
   const created = await request(app)
     .post('/api/artifacts')
@@ -72,6 +87,22 @@ before(async () => {
     .send({ slug: 'viewer-only', title: 'Viewer only' })
     .expect(201);
   artifactPublicPath = new URL(created.body.publicUrl).pathname;
+
+  const authenticated = await request(app)
+    .post('/api/artifacts')
+    .set('authorization', `Bearer ${process.env.API_TOKEN}`)
+    .send({ slug: 'members-only', title: 'Members only', visibility: 'authenticated' })
+    .expect(201);
+  assert.equal(authenticated.body.publicUrl, undefined);
+  authenticatedArtifactPath = new URL(authenticated.body.viewerUrl).pathname;
+
+  const restricted = await request(app)
+    .post('/api/artifacts')
+    .set('authorization', `Bearer ${process.env.API_TOKEN}`)
+    .send({ slug: 'member-only', title: 'Member only', visibility: 'restricted', allowedUsers: ['member'] })
+    .expect(201);
+  assert.equal(restricted.body.publicUrl, undefined);
+  restrictedArtifactPath = new URL(restricted.body.viewerUrl).pathname;
 });
 
 after(() => state.close());
@@ -87,12 +118,19 @@ test('artifact bearer links remain view-only and set defensive headers', async (
   assert.match(viewed.text, /Read only/);
   assert.equal(viewed.headers['referrer-policy'], 'no-referrer');
   assert.match(viewed.headers['content-security-policy'], /default-src/);
+  assert.match(viewed.headers['content-security-policy'], /sandbox allow-scripts/);
   await request(app).post(`${artifactPublicPath}actions/job.feedback.submit`).send({ jobId: 'job-1' }).expect(404);
+  await request(app)
+    .post('/api/artifacts')
+    .set('authorization', `Bearer ${process.env.API_TOKEN}`)
+    .send({slug:'viewer-only',visibility:'authenticated'})
+    .expect(409);
 });
 
 test('bearer tokens are redacted from every logged URL field', () => {
   assert.equal(appModule.sanitizeRequestUrl('/a/report/secret-viewer-token/index.html'), '/a/report/[REDACTED]/index.html');
   assert.equal(appModule.sanitizeRequestUrl('/invite/secret-invitation-token'), '/invite/[REDACTED]');
+  assert.equal(appModule.sanitizeRequestUrl('/viewer/handoff/secret-exchange-code'), '/viewer/handoff/[REDACTED]');
 });
 
 test('invalid numeric limits fall back and production origins must be root URLs', () => {
@@ -108,6 +146,97 @@ test('artifact and authenticated app surfaces are isolated by hostname', async (
   await request(app).get(artifactPublicPath).set('host', 'apps.example.test').expect(404);
   await request(app).get('/auth/session').set('host', 'apps.example.test').set('cookie', memberCookie).expect(200);
   await request(app).get(artifactPublicPath).set('host', 'artifacts.example.test').expect(200);
+});
+
+test('private artifacts use a one-time cross-origin viewer handoff and separate cookie', async () => {
+  await request(app)
+    .put('/api/artifacts/members-only/files/index.html')
+    .set('authorization', `Bearer ${process.env.API_TOKEN}`)
+    .set('content-type', 'text/html')
+    .send('<h1>Private artifact</h1>')
+    .expect(201);
+  await request(app)
+    .put('/api/artifacts/members-only/files/deep/file%3Fname.html')
+    .set('authorization', `Bearer ${process.env.API_TOKEN}`)
+    .set('content-type', 'text/html')
+    .send('<h1>Private artifact</h1>')
+    .expect(201);
+  const requestedArtifactPath = `${authenticatedArtifactPath}deep/file%3Fname.html?tab=2`;
+
+  const start = await request(app)
+    .get(requestedArtifactPath)
+    .set('host', 'artifacts.example.test')
+    .expect(302);
+  const authorizeUrl = new URL(start.headers.location);
+  assert.equal(authorizeUrl.origin, 'https://apps.example.test');
+  assert.match(authorizeUrl.pathname, /^\/auth\/artifacts\/authorize\//);
+  assert.throws(() => auth.beginViewerHandoff('members-only', 'https://evil.example/steal'), /Invalid artifact return path/);
+
+  const anonymous = await request(app)
+    .get(authorizeUrl.pathname)
+    .set('host', 'apps.example.test')
+    .expect(302);
+  assert.match(anonymous.headers.location, /^\/login\?handoff=/);
+
+  const authorized = await request(app)
+    .get(authorizeUrl.pathname)
+    .set('host', 'apps.example.test')
+    .set('cookie', memberCookie)
+    .expect(302);
+  const exchangeUrl = new URL(authorized.headers.location);
+  assert.equal(exchangeUrl.origin, 'https://artifacts.example.test');
+  assert.match(exchangeUrl.pathname, /^\/viewer\/handoff\//);
+
+  const exchanged = await request(app)
+    .get(exchangeUrl.pathname)
+    .set('host', 'artifacts.example.test')
+    .expect(302);
+  assert.equal(exchanged.headers.location, requestedArtifactPath);
+  memberViewerCookie = cookieHeader(exchanged.headers['set-cookie']);
+  assert.match(memberViewerCookie, new RegExp(`^${authModule.VIEWER_SESSION_COOKIE}=`));
+  assert.doesNotMatch(memberViewerCookie, new RegExp(`^${authModule.SESSION_COOKIE}=`));
+  const rawViewerToken = memberViewerCookie.split('=', 2)[1];
+  assert.ok(state.getViewerSessionByHash(authModule.sha256(rawViewerToken)));
+  assert.equal(JSON.stringify(state.getViewerSessionByHash(authModule.sha256(rawViewerToken))).includes(rawViewerToken), false);
+  const listedViewerSession = state.listViewerSessions(memberId)[0];
+  assert.equal(listedViewerSession.source_session_id, memberSessionId);
+  assert.equal('token_hash' in listedViewerSession, false);
+
+  await request(app)
+    .get(requestedArtifactPath)
+    .set('host', 'artifacts.example.test')
+    .set('cookie', memberViewerCookie)
+    .expect(200, /Private artifact/);
+  await request(app)
+    .get(exchangeUrl.pathname)
+    .set('host', 'artifacts.example.test')
+    .expect(401);
+  await request(app)
+    .get('/auth/session')
+    .set('host', 'apps.example.test')
+    .set('cookie', memberViewerCookie)
+    .expect(401);
+});
+
+test('restricted artifact ACLs deny unlisted users and allow listed users', async () => {
+  const start = await request(app)
+    .get(restrictedArtifactPath)
+    .set('host', 'artifacts.example.test')
+    .expect(302);
+  const authorizeUrl = new URL(start.headers.location);
+
+  await request(app)
+    .get(authorizeUrl.pathname)
+    .set('host', 'apps.example.test')
+    .set('cookie', otherCookie)
+    .expect(403);
+
+  const authorized = await request(app)
+    .get(authorizeUrl.pathname)
+    .set('host', 'apps.example.test')
+    .set('cookie', memberCookie)
+    .expect(302);
+  assert.match(authorized.headers.location, /^https:\/\/artifacts\.example\.test\/viewer\/handoff\//);
 });
 
 test('recovery creates only a restricted session until a passkey is enrolled', async () => {
@@ -145,6 +274,7 @@ test('admin routes require a full admin session and CSRF/origin on mutations', a
   const dashboard = await request(app).get('/admin').set('cookie', adminCookie).expect(200);
   assert.match(dashboard.text, /Users/);
   assert.match(dashboard.text, /Artifacts/);
+  assert.match(dashboard.text, /Artifact viewer sessions/);
   assert.match(dashboard.text, /Actions/);
   assert.match(dashboard.text, /https:\/\/artifacts\.example\.test\/admin\/files\//);
   await request(app).post('/admin/api/invitations').set('cookie', adminCookie).send({ username: 'blocked', role: 'member', scopes: [] }).expect(403);
@@ -163,15 +293,70 @@ test('admin routes require a full admin session and CSRF/origin on mutations', a
     .send({ username: 'new-user', role: 'member', scopes: ['jobs:feedback'] })
     .expect(201);
   assert.match(invite.body.invitationUrl, /\/invite\//);
+
+  const viewerBefore = await request(app).get('/api/artifacts/viewer-only').set('authorization', `Bearer ${process.env.API_TOKEN}`).expect(200);
+  await request(app)
+    .post('/admin/api/artifacts/viewer-only/access')
+    .set('cookie', adminCookie)
+    .set('origin', 'https://apps.example.test')
+    .set('x-csrf-token', adminCsrf)
+    .send({ visibility: 'restricted', allowedUsers: ['member'], expectedUpdatedAt: viewerBefore.body.artifact.updatedAt })
+    .expect(200);
+  await request(app).get(artifactPublicPath).set('host', 'artifacts.example.test').expect(404);
+  const viewerPrivate = await request(app).get('/api/artifacts/viewer-only').set('authorization', `Bearer ${process.env.API_TOKEN}`).expect(200);
+  const rotate = () => request(app)
+    .post('/admin/api/artifacts/viewer-only/access')
+    .set('cookie', adminCookie)
+    .set('origin', 'https://apps.example.test')
+    .set('x-csrf-token', adminCsrf)
+    .send({ visibility: 'bearer', allowedUsers: [], expectedUpdatedAt: viewerPrivate.body.artifact.updatedAt });
+  const rotations = await Promise.all([rotate(), rotate()]);
+  assert.deepEqual(rotations.map((response) => response.status).sort(), [200, 409]);
+  const publicAgain = rotations.find((response) => response.status === 200)!;
+  assert.match(publicAgain.body.publicUrl, /^https:\/\/artifacts\.example\.test\/a\/viewer-only\//);
+  const rotatedPath = new URL(publicAgain.body.publicUrl).pathname;
+  assert.notEqual(rotatedPath, artifactPublicPath);
+  await request(app).get(artifactPublicPath).set('host', 'artifacts.example.test').expect(404);
+  await request(app).get(rotatedPath).set('host', 'artifacts.example.test').expect(200);
+  artifactPublicPath = rotatedPath;
+
+  await request(app)
+    .post('/admin/api/artifacts/viewer-only/revoke')
+    .set('cookie', adminCookie)
+    .set('origin', 'https://apps.example.test')
+    .set('x-csrf-token', adminCsrf)
+    .send({})
+    .expect(200);
+  const revoked = await request(app).get('/api/artifacts/viewer-only').set('authorization', `Bearer ${process.env.API_TOKEN}`).expect(200);
+  await request(app)
+    .post('/admin/api/artifacts/viewer-only/access')
+    .set('cookie', adminCookie)
+    .set('origin', 'https://apps.example.test')
+    .set('x-csrf-token', adminCsrf)
+    .send({ visibility: 'bearer', allowedUsers: [], expectedUpdatedAt: revoked.body.artifact.updatedAt })
+    .expect(409);
 });
 
 test('sessions are stored hashed, revocable, and suspended users are denied', async () => {
   const rows = state.listSessions(memberId);
   assert.ok(rows.length > 0);
   assert.equal(rows.some((row) => row.tokenHash.includes(memberCookie.split('=', 2)[1])), false);
+  state.revokeSession(memberSessionId);
+  await request(app).get('/auth/session').set('cookie', memberCookie).expect(401);
+  await request(app).get(authenticatedArtifactPath).set('host', 'artifacts.example.test').set('cookie', memberViewerCookie).expect(302);
+  let replacement = auth.issueSession(memberId, 'full');
+  memberCookie = `${authModule.SESSION_COOKIE}=${replacement.token}`;
+  memberCsrf = replacement.csrfToken;
   auth.revokeAllSessions(memberId, adminId);
   await request(app).get('/auth/session').set('cookie', memberCookie).expect(401);
-  let replacement = auth.issueSession(memberId, 'full');
+  replacement = auth.issueSession(memberId, 'full');
+  memberCookie = `${authModule.SESSION_COOKIE}=${replacement.token}`;
+  memberCsrf = replacement.csrfToken;
+  const delayedHandoff = auth.beginViewerHandoff('members-only', authenticatedArtifactPath);
+  const delayedExchange = auth.authorizeViewerHandoff(delayedHandoff, memberId, replacement.row.id)!;
+  state.revokeSession(replacement.row.id);
+  assert.equal(auth.finishViewerHandoff(delayedExchange), null);
+  replacement = auth.issueSession(memberId, 'full');
   memberCookie = `${authModule.SESSION_COOKIE}=${replacement.token}`;
   memberCsrf = replacement.csrfToken;
   auth.setUserStatus(memberId, 'suspended', adminId);

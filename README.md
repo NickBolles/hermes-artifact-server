@@ -6,10 +6,10 @@ A hardened Node.js/Docker service for publishing browser-loadable Hermes artifac
 
 The service deliberately separates two trust models:
 
-- **Artifacts** — read-only static snapshots served through revocable bearer URLs.
+- **Artifacts** — read-only static snapshots served through revocable bearer URLs or per-artifact user access rules.
 - **Artifact Apps** — invite-only, identity-authenticated pages that accept strict business actions and can dispatch bounded events/runs to Hermes.
 
-An artifact token never becomes an application session and no mutation route exists beneath `/a/*`. Artifact HTML and authenticated pages must use **different hostnames**; otherwise uploaded same-origin JavaScript could act as the signed-in user.
+An artifact token or viewer session never becomes an application session and no mutation route exists beneath `/a/*` or `/v/*`. Artifact HTML and authenticated pages must use **different hostnames**; otherwise uploaded same-origin JavaScript could act as the signed-in user.
 
 ## Features
 
@@ -17,6 +17,10 @@ An artifact token never becomes an application session and no mutation route exi
 
 - mounted artifact directory with `index.html` rendering
 - tokenized viewer links and optional expiration
+- `bearer`, `authenticated`, and `restricted` per-artifact visibility
+- selected-user ACLs with an audited, one-time cross-origin login handoff
+- a separate hashed, 15-minute viewer session bound to the source app session; logout/revocation invalidates both
+- CSP sandboxing without `allow-same-origin`, preventing artifact JavaScript from reading viewer cookies, storage, or other ACL-protected artifacts
 - bearer-token publishing API
 - path-traversal protection, hidden metadata, upload limits
 - optional legacy Basic-auth file browser
@@ -91,8 +95,10 @@ unset PASSWORD
 1. Admin signs in with a passkey at `/login`.
 2. `/admin` creates a one-time invitation with role and scopes.
 3. The invitee sets a recovery password and enrolls a passkey.
-4. Admin can suspend/reactivate users, revoke sessions, remove passkeys, revoke artifact viewer links, and inspect actions/audit state.
-5. Authenticated users use `/app/jobs`; viewer artifacts stay unchanged and read-only.
+4. Admin can suspend/reactivate users, revoke sessions, remove passkeys, choose each artifact's visibility/allowed users, revoke artifacts, and inspect actions/audit state.
+5. Authenticated users use `/app/jobs`. Private artifact visits reuse that login through a short-lived, one-time handoff and then remain read-only on the artifact hostname.
+
+Changing an artifact back to `bearer` visibility rotates its bearer token. The previous viewer URL remains invalid and the admin API returns the replacement URL once.
 
 The optional `ADMIN_USERNAME`/`ADMIN_PASSWORD` variables protect only the legacy `/admin/files/` route. They are not application credentials and may be left unset when the legacy browser is unnecessary.
 
@@ -151,7 +157,7 @@ Create an artifact:
 curl -sS -X POST http://localhost:3000/api/artifacts \
   -H "Authorization: Bearer $API_TOKEN" \
   -H "content-type: application/json" \
-  -d '{"slug":"demo","title":"Demo artifact","allowDirectoryListing":true}'
+  -d '{"slug":"demo","title":"Demo artifact","visibility":"restricted","allowedUsers":["nick"],"allowDirectoryListing":true}'
 ```
 
 Upload a file:
@@ -168,6 +174,8 @@ curl -sS -X PUT http://localhost:3000/api/artifacts/demo/files/index.html \
 - `GET /health`
 - `POST/GET /api/artifacts*` — publishing API
 - `GET /a/:slug/:token/*` — read-only artifact viewer
+- `GET /v/:slug/*` — authenticated/restricted read-only artifact viewer
+- `GET /auth/artifacts/authorize/:handoffId`, `GET /viewer/handoff/:exchange` — one-time cross-origin viewer login
 - `GET /login`, `GET /recovery`, `GET /invite/:token`
 - `POST /auth/passkeys/*`, `POST /auth/recovery`, `POST /auth/logout`
 - `GET /app/jobs`, `POST/GET /app/:appId/actions/*`
