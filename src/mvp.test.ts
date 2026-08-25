@@ -23,12 +23,13 @@ process.env.HERMES_API_URL = 'http://hermes.test';
 process.env.HERMES_API_KEY = 'test-hermes-api-key';
 process.env.NODE_ENV = 'test';
 
-const [appModule, stateModule, authModule, actionsModule, workerModule] = await Promise.all([
+const [appModule, stateModule, authModule, actionsModule, workerModule, configModule] = await Promise.all([
   import('./app.js'),
   import('./state.js'),
   import('./app-auth.js'),
   import('./actions.js'),
   import('./worker.js'),
+  import('./config.js'),
 ]);
 const { createApp } = appModule;
 
@@ -94,6 +95,14 @@ test('bearer tokens are redacted from every logged URL field', () => {
   assert.equal(appModule.sanitizeRequestUrl('/invite/secret-invitation-token'), '/invite/[REDACTED]');
 });
 
+test('invalid numeric limits fall back and production origins must be root URLs', () => {
+  assert.equal(configModule.positiveInt('not-a-number', 10), 10);
+  assert.equal(configModule.positiveInt('0', 10), 10);
+  assert.equal(configModule.positiveInt('3', 10), 3);
+  assert.equal(configModule.isCleanHttpsOrigin(new URL('https://apps.example.test/')), true);
+  assert.equal(configModule.isCleanHttpsOrigin(new URL('https://apps.example.test/prefix')), false);
+});
+
 test('artifact and authenticated app surfaces are isolated by hostname', async () => {
   await request(app).get('/auth/session').set('host', 'artifacts.example.test').set('cookie', memberCookie).expect(404);
   await request(app).get(artifactPublicPath).set('host', 'apps.example.test').expect(404);
@@ -137,6 +146,7 @@ test('admin routes require a full admin session and CSRF/origin on mutations', a
   assert.match(dashboard.text, /Users/);
   assert.match(dashboard.text, /Artifacts/);
   assert.match(dashboard.text, /Actions/);
+  assert.match(dashboard.text, /https:\/\/artifacts\.example\.test\/admin\/files\//);
   await request(app).post('/admin/api/invitations').set('cookie', adminCookie).send({ username: 'blocked', role: 'member', scopes: [] }).expect(403);
   await request(app)
     .post('/admin/api/invitations')
