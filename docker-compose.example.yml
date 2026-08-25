@@ -21,8 +21,8 @@ services:
       RECOVERY_MAX_CONCURRENT: "2"
       HERMES_RUN_MAX_MINUTES: "30"
     volumes:
-      - ./artifacts:/data/artifacts
-      - ./state:/data/state
+      - artifact-data:/data/artifacts
+      - artifact-state:/data/state
     read_only: true
     tmpfs:
       - /tmp
@@ -30,3 +30,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+
+volumes:
+  artifact-data:
+  artifact-state:

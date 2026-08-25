@@ -111,7 +111,7 @@ The optional `ADMIN_USERNAME`/`ADMIN_PASSWORD` variables protect only the legacy
 /data/state/artifact-app.db-shm  # SQLite shared-memory sidecar
 ```
 
-Back up both mounted directories. For SQLite, stop the container or use SQLite’s online backup mechanism; do not copy only the main database while WAL writes are active. The database and its containing directory are restricted to the container user where the filesystem supports POSIX modes.
+Back up both mounted directories. The Compose example uses named volumes so Docker preserves the image's non-root ownership; if you replace them with bind mounts, pre-create and chown both host directories for container UID 100 before startup. For SQLite, stop the container or use SQLite’s online backup mechanism; do not copy only the main database while WAL writes are active. The database and its containing directory are restricted to the container user where the filesystem supports POSIX modes.
 
 ## Hermes integration
 
