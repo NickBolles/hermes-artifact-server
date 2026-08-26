@@ -4,7 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import request from 'supertest';
 
-const testBase = path.resolve('test-tmp');
+const testBase = path.resolve('test-tmp', 'app');
 await fs.rm(testBase, { recursive: true, force: true });
 await fs.mkdir(testBase, { recursive: true });
 const root = await fs.mkdtemp(path.join(testBase, 'artifact-server-'));

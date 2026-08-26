@@ -38,7 +38,7 @@ An artifact token or viewer session never becomes an application session and no 
 
 ### Action broker
 
-- strict Zod action registry (`job.feedback.submit`, `report.question.ask`)
+- strict Zod action registry (`job.feedback.submit`, `report.question.ask`, `design.decision.submit`)
 - server-derived actors/scopes and app-level action manifests
 - durable SQLite idempotency with request hashes
 - durable per-action minute/day limits
@@ -97,6 +97,8 @@ unset PASSWORD
 3. The invitee sets a recovery password and enrolls a passkey.
 4. Admin can suspend/reactivate users, revoke sessions, remove passkeys, choose each artifact's visibility/allowed users, revoke artifacts, and inspect actions/audit state.
 5. Authenticated users use `/app/jobs`. Private artifact visits reuse that login through a short-lived, one-time handoff and then remain read-only on the artifact hostname.
+
+The `/app/decisions` showcase demonstrates the complete trusted-action path with three fixed design choices. A click submits only a validated enum value, is persisted with durable idempotency and audit history, enters the leased outbox, starts a bounded Hermes run, and polls the result back into the page. The static artifact surface remains read-only by design; it links into this authenticated app surface for mutations.
 
 Changing an artifact back to `bearer` visibility rotates its bearer token. The previous viewer URL remains invalid and the admin API returns the replacement URL once.
 
@@ -178,7 +180,7 @@ curl -sS -X PUT http://localhost:3000/api/artifacts/demo/files/index.html \
 - `GET /auth/artifacts/authorize/:handoffId`, `GET /viewer/handoff/:exchange` — one-time cross-origin viewer login
 - `GET /login`, `GET /recovery`, `GET /invite/:token`
 - `POST /auth/passkeys/*`, `POST /auth/recovery`, `POST /auth/logout`
-- `GET /app/jobs`, `POST/GET /app/:appId/actions/*`
+- `GET /app/jobs`, `GET /app/decisions`, `POST/GET /app/:appId/actions/*`
 - `GET /admin`, `/admin/api/*` — passkey-authenticated admin console
 - `GET /admin/files/*` — optional legacy Basic-auth browser
 
