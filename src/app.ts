@@ -10,7 +10,7 @@ import { pinoHttp } from 'pino-http';
 import { z } from 'zod';
 import { requireAdmin, requireApiToken } from './auth.js';
 import { AUTH_FLOW_COOKIE, createAuthService, sha256, type ActiveSession, type AuthService } from './app-auth.js';
-import { browserScript, renderAdmin, renderInvite, renderJobs, renderLogin, renderRecovery } from './app-ui.js';
+import { browserScript, renderAdmin, renderDecision, renderInvite, renderJobs, renderLogin, renderRecovery } from './app-ui.js';
 import { ActionError, createActionService } from './actions.js';
 import { config } from './config.js';
 import { adminUrl, artifactUrl, artifactViewerUrl, canUserViewArtifact, createArtifact, isExpired, listArtifacts, readMeta, revokeArtifact, updateArtifactAccess, verifyArtifactToken } from './metadata.js';
@@ -122,6 +122,7 @@ export function createApp(options:{state?:StateStore;auth?:AuthService;startWork
   });
 
   app.get('/app/jobs',fullSession,(req,res)=>{const current=res.locals.session as ActiveSession;appHeaders(res);res.send(renderJobs(current.user,current.row.csrfToken))});
+  app.get('/app/decisions',fullSession,(req,res)=>{const current=res.locals.session as ActiveSession;if(!(current.user.scopes.includes('*')||current.user.scopes.includes('decisions:submit')))return res.status(403).json({error:'Insufficient scope'});appHeaders(res);res.send(renderDecision(current.user,current.row.csrfToken))});
   app.post('/app/:appId/actions/:action',fullMutation,(req,res,next)=>{try{const current=res.locals.session as ActiveSession;const idempotencyKey=req.get('idempotency-key')??'';const outcome=actions.submit({actor:current.user,appId:routeParam(req.params.appId),action:routeParam(req.params.action),body:req.body,idempotencyKey});res.status(outcome.duplicate?200:202).json({action:outcome.action})}catch(error){next(error)}});
   app.get('/app/:appId/actions/:id',fullSession,(req,res)=>{const current=res.locals.session as ActiveSession;const action=state.getAction(routeParam(req.params.id));if(!action||action.actorId!==current.user.id||action.appId!==routeParam(req.params.appId))return res.status(404).json({error:'Action not found'});res.json({action})});
 
@@ -175,7 +176,7 @@ export function createApp(options:{state?:StateStore;auth?:AuthService;startWork
   app.get('/admin/files{/*adminPath}',async(req,res,next)=>{try{const adminPath=publicPathFromWildcard(req.params.adminPath);const target=safeResolve(adminPath);const stat=await fs.stat(target);if(stat.isDirectory()){await renderDirectory(res,{title:`Artifacts /${adminPath}`,dirPath:target,urlPrefix:`/admin/files/${adminPath}`,showHidden:true});return}res.sendFile(target)}catch(error){next(error)}});
   app.get('/',(req,res)=>{if(req.hostname.toLowerCase()===config.artifactHostname)return res.redirect('/admin/files/');if(req.hostname.toLowerCase()!==config.appHostname)return res.status(404).send('Not found');const current=auth.getRequestSession(req);if(current?.row.kind==='full')return res.redirect(current.user.role==='admin'?'/admin':'/app/jobs');res.redirect('/login')});
 
-  app.use((error:unknown,_req:Request,res:Response,_next:NextFunction)=>{const message=errorMessage(error);const status=error instanceof ActionError?error.status:error instanceof z.ZodError?400:message==='Artifact not found'?404:message==='Allowed user not found'?400:message==='Artifact is revoked or expired'||message.startsWith('Artifact access changed;')?409:message.includes('escapes artifact root')?400:message.includes('already exists')?409:500;if(error instanceof ActionError&&error.retryAfter)res.set('Retry-After',String(error.retryAfter));res.status(status).json({error:status>=500?'Internal error':message})});
+  app.use((error:unknown,_req:Request,res:Response,_next:NextFunction)=>{const message=errorMessage(error);const status=error instanceof ActionError?error.status:error instanceof z.ZodError?400:message==='Artifact not found'?404:message==='Invalid or expired invitation'?410:message==='Invalid username'||message==='Allowed user not found'?400:message==='Artifact is revoked or expired'||message.startsWith('Artifact access changed;')?409:message.includes('escapes artifact root')?400:message.includes('already exists')?409:500;if(error instanceof ActionError&&error.retryAfter)res.set('Retry-After',String(error.retryAfter));res.status(status).json({error:status>=500?'Internal error':message})});
   ensureRoot().catch(console.error);
   return app;
 }

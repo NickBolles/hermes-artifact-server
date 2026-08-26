@@ -177,6 +177,8 @@ export class StateStore {
     try { this.db.exec('ALTER TABLE artifact_viewer_sessions ADD COLUMN source_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE'); } catch {}
     this.db.prepare(`INSERT OR IGNORE INTO apps(id,name,allowed_actions,created_at) VALUES(?,?,?,?)`)
       .run('jobs', 'Jobs', JSON.stringify(['job.feedback.submit', 'report.question.ask']), now());
+    this.db.prepare(`INSERT OR IGNORE INTO apps(id,name,allowed_actions,created_at) VALUES(?,?,?,?)`)
+      .run('decisions', 'Design decisions', JSON.stringify(['design.decision.submit']), now());
   }
 
   close(): void { this.db.close(); }

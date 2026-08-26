@@ -20,6 +20,7 @@ const ARGON_OPTIONS = { algorithm: Algorithm.Argon2id, memoryCost: 19_456, timeC
 function token(bytes = 32): string { return randomBytes(bytes).toString('base64url'); }
 export function sha256(value: string | Buffer): string { return createHash('sha256').update(value).digest('hex'); }
 function normalizeUsername(value: string): string { return value.trim().toLowerCase(); }
+function validatedUsername(value:string):string { const username=normalizeUsername(value); if(!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(username))throw new Error('Invalid username'); return username; }
 function addMinutes(minutes: number): string { return new Date(Date.now() + minutes * 60_000).toISOString(); }
 function addHours(hours: number): string { return new Date(Date.now() + hours * 3_600_000).toISOString(); }
 function equalText(a:string,b:string):boolean { const x=Buffer.from(a); const y=Buffer.from(b); return x.length===y.length && timingSafeEqual(x,y); }
@@ -47,15 +48,14 @@ export class AuthService {
 
   async bootstrapAdmin(input: {username:string;recoveryPassword:string}): Promise<string> {
     if (this.state.countUsers() > 0) throw new Error('Bootstrap refused: users already exist');
-    const id=randomUUID();
-    this.state.createUser({id,username:normalizeUsername(input.username),role:'admin',status:'active',scopes:['*'],recoveryPasswordHash:await this.hashRecoveryPassword(input.recoveryPassword),requiresPasskeyEnrollment:true});
+    const id=randomUUID(); const username=validatedUsername(input.username);
+    this.state.createUser({id,username,role:'admin',status:'active',scopes:['*'],recoveryPasswordHash:await this.hashRecoveryPassword(input.recoveryPassword),requiresPasskeyEnrollment:true});
     this.state.audit(id,'admin.bootstrapped','user',id);
     return id;
   }
 
   createInvitation(actorId:string,input:{username:string;role:UserRole;scopes:string[];expiresInMinutes?:number}):{id:string;token:string;expiresAt:string} {
-    const username=normalizeUsername(input.username);
-    if(!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(username)) throw new Error('Invalid username');
+    const username=validatedUsername(input.username);
     if(this.state.getUserByUsername(username)) throw new Error('Username already exists');
     const raw=token(); const id=randomUUID(); const expiresAt=addMinutes(input.expiresInMinutes??60);
     this.state.createInvitation({id,tokenHash:sha256(raw),username,role:input.role,scopes:[...new Set(input.scopes)].slice(0,32),expiresAt,createdBy:actorId});

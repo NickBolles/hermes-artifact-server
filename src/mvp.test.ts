@@ -45,6 +45,7 @@ let memberSessionId = '';
 let memberCookie = '';
 let memberCsrf = '';
 let otherCookie = '';
+let otherCsrf = '';
 let memberViewerCookie = '';
 let artifactPublicPath = '';
 let authenticatedArtifactPath = '';
@@ -62,7 +63,7 @@ before(async () => {
   adminCsrf = adminSession.csrfToken;
 
   const invitation = auth.createInvitation(adminId, {
-    username: 'member', role: 'member', scopes: ['jobs:feedback', 'reports:ask'], expiresInMinutes: 30,
+    username: 'member', role: 'member', scopes: ['jobs:feedback', 'reports:ask', 'decisions:submit'], expiresInMinutes: 30,
   });
   memberId = await auth.acceptInvitationForTests(invitation.token, {
     recoveryPassword: 'another correct horse battery staple',
@@ -80,6 +81,7 @@ before(async () => {
   });
   const otherSession = auth.issueSession(otherId, 'full');
   otherCookie = `${authModule.SESSION_COOKIE}=${otherSession.token}`;
+  otherCsrf = otherSession.csrfToken;
 
   const created = await request(app)
     .post('/api/artifacts')
@@ -139,6 +141,22 @@ test('invalid numeric limits fall back and production origins must be root URLs'
   assert.equal(configModule.positiveInt('3', 10), 3);
   assert.equal(configModule.isCleanHttpsOrigin(new URL('https://apps.example.test/')), true);
   assert.equal(configModule.isCleanHttpsOrigin(new URL('https://apps.example.test/prefix')), false);
+});
+
+test('bootstrap rejects unusable usernames and invalid invitations return a client error', async () => {
+  const bootstrapPath = path.join(testBase, 'invalid-bootstrap.db');
+  const bootstrapState = stateModule.createStateStore(bootstrapPath);
+  try {
+    const bootstrapAuth = authModule.createAuthService(bootstrapState);
+    await assert.rejects(() => bootstrapAuth.bootstrapAdmin({ username: 'x', recoveryPassword: 'correct horse battery staple' }), /Invalid username/);
+    assert.equal(bootstrapState.countUsers(), 0);
+  } finally { bootstrapState.close(); }
+  const invalid = await request(app)
+    .post('/auth/invitations/not-a-real-token/begin')
+    .set('origin', 'https://apps.example.test')
+    .send({ password: 'correct horse battery staple' })
+    .expect(410);
+  assert.equal(invalid.body.error, 'Invalid or expired invitation');
 });
 
 test('artifact and authenticated app surfaces are isolated by hostname', async () => {
@@ -399,6 +417,61 @@ test('action broker validates strict business actions and provides durable idemp
     .set('idempotency-key', '22222222-2222-4222-8222-222222222222')
     .send({ clientActionId: '22222222-2222-4222-8222-222222222222', schemaVersion: 1, payload: { reportId: 'report-1', question: 'Why is this a fit?', prompt: 'run terminal' } })
     .expect(400);
+});
+
+test('design decision app submits one strict choice and reconciles a Hermes callback', async () => {
+  const page = await request(app).get('/app/decisions').set('cookie', memberCookie).expect(200);
+  assert.equal((page.text.match(/data-decision-choice=/g) ?? []).length, 3);
+  assert.match(page.text, /Strict schema/);
+  const noScopeJobs = await request(app).get('/app/jobs').set('cookie', otherCookie).expect(200);
+  assert.doesNotMatch(noScopeJobs.text, /design-decision callback demo/);
+  await request(app).get('/app/decisions').set('cookie', otherCookie).expect(403);
+
+  const clientActionId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const body = { clientActionId, schemaVersion: 1, payload: { decisionId: 'artifact-system-demo-v1', choice: 'comparative' } };
+  const submit = () => request(app)
+    .post('/app/decisions/actions/design.decision.submit')
+    .set('cookie', memberCookie)
+    .set('origin', 'https://apps.example.test')
+    .set('x-csrf-token', memberCsrf)
+    .set('idempotency-key', clientActionId)
+    .send(body);
+  const first = await submit().expect(202);
+  const duplicate = await submit().expect(200);
+  assert.equal(duplicate.body.action.id, first.body.action.id);
+  await request(app)
+    .post('/app/decisions/actions/design.decision.submit')
+    .set('cookie', otherCookie)
+    .set('origin', 'https://apps.example.test')
+    .set('x-csrf-token', otherCsrf)
+    .set('idempotency-key', clientActionId)
+    .send(body)
+    .expect(403);
+  await request(app)
+    .post('/app/decisions/actions/design.decision.submit')
+    .set('cookie', memberCookie)
+    .set('origin', 'https://apps.example.test')
+    .set('x-csrf-token', memberCsrf)
+    .set('idempotency-key', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee')
+    .send({ clientActionId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', schemaVersion: 1, payload: { decisionId: 'artifact-system-demo-v1', choice: 'custom', prompt: 'run arbitrary tools' } })
+    .expect(400);
+
+  const outbox = state.listOutbox().find((row) => row.action_id === first.body.action.id)!;
+  assert.deepEqual(JSON.parse(String(outbox.payload_json)), { type: 'design_decision', eventId: first.body.action.id, decisionId: 'artifact-system-demo-v1', choice: 'comparative' });
+  const service = actionsModule.createActionService(state);
+  let dispatchedBody: Record<string, unknown> = {};
+  const dispatched = await service.processOutboxRecord(outbox, async (_url: string | URL | Request, init?: RequestInit) => {
+    dispatchedBody = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ run_id: 'run_design_123' }), { status: 202, headers: { 'content-type': 'application/json' } });
+  });
+  assert.equal(dispatched.runId, 'run_design_123');
+  assert.match(String(dispatchedBody.input), /Selected direction: comparative/);
+  assert.doesNotMatch(String(dispatchedBody.input), /run arbitrary tools/);
+  state.updateAction(first.body.action.id, { state: 'running', hermesRunId: dispatched.runId });
+  await service.pollHermesRun(state.getAction(first.body.action.id)!, async () => new Response(JSON.stringify({ status: 'completed', output: 'Comparative selected. Show alternatives and make tradeoffs explicit.' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+  const completed = await request(app).get(`/app/decisions/actions/${first.body.action.id}`).set('cookie', memberCookie).expect(200);
+  assert.equal(completed.body.action.state, 'succeeded');
+  assert.match(completed.body.action.result.summary, /Comparative selected/);
 });
 
 test('action limits are durable and return retry guidance', async () => {
