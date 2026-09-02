@@ -43,6 +43,13 @@ function artifactHeaders(res:Response,sandbox=false):void {
     'Cache-Control':'private, no-store',
   });
 }
+function bearerArtifactHeaders(res:Response):void {
+  artifactHeaders(res,true);
+  res.set({
+    'Access-Control-Allow-Origin':'*',
+    'Cross-Origin-Resource-Policy':'cross-origin',
+  });
+}
 function errorMessage(error:unknown):string { return error instanceof z.ZodError?'Invalid request':error instanceof Error?error.message:'Internal error'; }
 function routeParam(value:string|string[]|undefined):string { return Array.isArray(value)?value[0]??'':value??''; }
 export function sanitizeRequestUrl(value:string):string { return value.replace(/(\/a\/[^/]+\/)[^/?#]+/,'$1[REDACTED]').replace(/(\/invite\/)[^/?#]+/,'$1[REDACTED]').replace(/(\/viewer\/handoff\/)[^/?#]+/,'$1[REDACTED]'); }
@@ -155,7 +162,7 @@ export function createApp(options:{state?:StateStore;auth?:AuthService;startWork
   app.put('/api/artifacts/:slug/files{/*filePath}',express.raw({type:'*/*',limit:config.maxUploadBytes}),async(req,res,next)=>{try{const slug=safeSlug(routeParam(req.params.slug));if(!(await readMeta(slug)))return res.status(404).json({error:'Artifact not found'});const filePath=publicPathFromWildcard(req.params.filePath);if(!filePath)return res.status(400).json({error:'File path is required'});const dest=safeResolve(slug,filePath);await fs.mkdir(path.dirname(dest),{recursive:true});await fs.writeFile(dest,req.body);res.status(201).json({ok:true,path:filePath})}catch(error){next(error)}});
   app.post('/api/artifacts/:slug/files',async(req,res,next)=>{try{const slug=safeSlug(routeParam(req.params.slug));if(!(await readMeta(slug)))return res.status(404).json({error:'Artifact not found'});const contentType=req.get('content-type');if(!contentType)return res.status(400).json({error:'Multipart content-type is required'});const headers={...req.headers,'content-type':contentType} as BusboyHeaders;const busboy=Busboy({headers,limits:{files:1,fileSize:config.maxUploadBytes}});let targetPath='';let uploaded=false;const writes:Promise<void>[]=[];busboy.on('field',(name:string,value:string)=>{if(name==='path')targetPath=value});busboy.on('file',(_field:string,file:BusboyFileStream,filename:string)=>{uploaded=true;const dest=safeResolve(slug,targetPath||filename||'upload.bin');writes.push(fs.mkdir(path.dirname(dest),{recursive:true}).then(()=>new Promise<void>((resolve,reject)=>{const chunks:Buffer[]=[];file.on('data',(chunk:Buffer)=>chunks.push(Buffer.from(chunk)));file.on('limit',()=>reject(new Error('Upload exceeded MAX_UPLOAD_BYTES')));file.on('end',()=>fs.writeFile(dest,Buffer.concat(chunks)).then(resolve,reject));file.on('error',reject)})))});busboy.on('finish',async()=>{if(!uploaded)return res.status(400).json({error:'No file uploaded'});await Promise.all(writes);return res.status(201).json({ok:true})});busboy.on('error',next);req.pipe(busboy)}catch(error){next(error)}});
 
-  app.get('/a/:slug/:token{/*artifactPath}',async(req,res,next)=>{try{const slug=safeSlug(routeParam(req.params.slug));const meta=await readMeta(slug);if(!meta||!(await verifyArtifactToken(meta,routeParam(req.params.token))))return res.status(404).send('Not found');artifactHeaders(res,true);const artifactPath=publicPathFromWildcard(req.params.artifactPath);await sendArtifactPath(req,res,{slug,requestPath:artifactPath,urlPrefix:`/a/${encodeURIComponent(slug)}/${encodeURIComponent(routeParam(req.params.token))}/${artifactPath}`,allowDirectoryListing:meta.allowDirectoryListing})}catch(error){next(error)}});
+  app.get('/a/:slug/:token{/*artifactPath}',async(req,res,next)=>{try{const slug=safeSlug(routeParam(req.params.slug));const meta=await readMeta(slug);if(!meta||!(await verifyArtifactToken(meta,routeParam(req.params.token))))return res.status(404).send('Not found');bearerArtifactHeaders(res);const artifactPath=publicPathFromWildcard(req.params.artifactPath);await sendArtifactPath(req,res,{slug,requestPath:artifactPath,urlPrefix:`/a/${encodeURIComponent(slug)}/${encodeURIComponent(routeParam(req.params.token))}/${artifactPath}`,allowDirectoryListing:meta.allowDirectoryListing})}catch(error){next(error)}});
   app.get('/v/:slug{/*artifactPath}',async(req,res,next)=>{try{
     artifactHeaders(res);
     const slug=safeSlug(routeParam(req.params.slug)); const meta=await readMeta(slug);
