@@ -116,11 +116,27 @@ test('artifact bearer links remain view-only and set defensive headers', async (
     .set('content-type', 'text/html')
     .send('<h1>Read only</h1>')
     .expect(201);
+  await request(app)
+    .put('/api/artifacts/viewer-only/files/data.json')
+    .set('authorization', `Bearer ${process.env.API_TOKEN}`)
+    .set('content-type', 'text/plain')
+    .send(JSON.stringify({ ok: true }))
+    .expect(201);
   const viewed = await request(app).get(artifactPublicPath).expect(200);
   assert.match(viewed.text, /Read only/);
   assert.equal(viewed.headers['referrer-policy'], 'no-referrer');
   assert.match(viewed.headers['content-security-policy'], /default-src/);
   assert.match(viewed.headers['content-security-policy'], /sandbox allow-scripts/);
+  assert.doesNotMatch(viewed.headers['content-security-policy'], /allow-same-origin/);
+  assert.equal(viewed.headers['access-control-allow-origin'], '*');
+  assert.equal(viewed.headers['cross-origin-resource-policy'], 'cross-origin');
+  const asset = await request(app)
+    .get(`${artifactPublicPath}data.json`)
+    .set('origin', 'null')
+    .expect(200);
+  assert.deepEqual(asset.body, { ok: true });
+  assert.equal(asset.headers['access-control-allow-origin'], '*');
+  assert.equal(asset.headers['cross-origin-resource-policy'], 'cross-origin');
   await request(app).post(`${artifactPublicPath}actions/job.feedback.submit`).send({ jobId: 'job-1' }).expect(404);
   await request(app)
     .post('/api/artifacts')
